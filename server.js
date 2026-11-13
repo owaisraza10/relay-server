@@ -26,7 +26,6 @@ wss.on('connection', (ws, req) => {
     }
 
     ws.on('message', (message) => {
-        // Handle text commands (like START_STREAM, STOP_STREAM, GET_METADATA) and frame buffers
         const isBinary = Buffer.isBuffer(message);
         const logContent = isBinary ? `[Binary/Frame Buffer: ${message.length} bytes]` : message.toString();
         console.log(`Received message from [${role}]: ${logContent.substring(0, 100)}...`);
