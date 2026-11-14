@@ -15,7 +15,7 @@ const PORT = process.env.PORT || 10000;
 const MAX_MESSAGE_SIZE = 2 * 1024 * 1024;
 
 // Maximum queued data per receiving socket (32MB to support larger files)
-const MAX_QUEUE_BYTES = 32 * 1024 * 1024;
+const MAX_QUEUE_BYTES = 16 * 1024 * 1024;
 
 // Heartbeat interval
 const HEARTBEAT_INTERVAL = 30000;
